@@ -1,5 +1,4 @@
 import { Client, GatewayIntentBits } from "discord.js";
-import OpenAI from "openai";
 
 const client = new Client({
   intents: [
@@ -9,11 +8,31 @@ const client = new Client({
   ]
 });
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const HF_TOKEN = process.env.HF_TOKEN;
 
-let conversations = {};
+async function askAI(message) {
+  const response = await fetch(
+    "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2",
+    {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${HF_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        inputs: message
+      })
+    }
+  );
+
+  const data = await response.json();
+
+  if (data.error) {
+    return "AI 暫時忙碌中，請稍後再試。";
+  }
+
+  return data[0]?.generated_text || "沒有回應";
+}
 
 client.once("ready", () => {
   console.log(`🤖 Bot 已上線：${client.user.tag}`);
@@ -23,45 +42,12 @@ client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
   if (!message.content.startsWith("!chat")) return;
 
-  const userId = message.author.id;
   const prompt = message.content.replace("!chat", "").trim();
-
-  if (!conversations[userId]) {
-    conversations[userId] = [
-      { role: "system", content: "你是一個像 ChatGPT 一樣自然、專業的助手。" }
-    ];
-  }
-
-  conversations[userId].push({
-    role: "user",
-    content: prompt
-  });
 
   await message.channel.sendTyping();
 
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: conversations[userId]
-    });
-
-    const reply = completion.choices[0].message.content;
-
-    conversations[userId].push({
-      role: "assistant",
-      content: reply
-    });
-
-    const chunks = reply.match(/[\s\S]{1,1900}/g);
-
-    for (let chunk of chunks) {
-      await message.reply(chunk);
-    }
-
-  } catch (error) {
-    console.error(error);
-    message.reply("發生錯誤，請稍後再試。");
-  }
+  const reply = await askAI(prompt);
+  message.reply(reply);
 });
 
 client.login(process.env.DISCORD_TOKEN);
