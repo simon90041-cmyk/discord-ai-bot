@@ -1,0 +1,15 @@
+{
+  "name": "discord-ai-chatbot",
+  "version": "1.0.0",
+  "description": "Discord AI chatbot using Claude API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.7"
+  }
+}
