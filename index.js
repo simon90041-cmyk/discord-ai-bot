@@ -60,6 +60,8 @@ const fallbackModel = genAI.getGenerativeModel({
 // ============================================================
 const userRoles = new Map();     // userId -> 角色描述
 const cooldowns = new Map();     // userId -> 上次請求時間
+const quizScores = new Map();    // userId -> 分數
+const quizActive = new Map();    // userId -> { answer, timestamp }
 const COOLDOWN_MS = 5000;
 const TIMEOUT_MS = 30000;
 const MAX_SESSIONS = 100;        // session 上限
@@ -372,7 +374,15 @@ client.on("messageCreate", async (message) => {
       "🛠️ **工具功能**",
       "`!translate <語言> <內容>` — 翻譯（例：`!translate 英文 你好`）",
       "`!summary` — 摘要目前的對話內容",
+      "`!search <關鍵字>` — AI 知識搜尋摘要",
+      "`!code <語言> <描述>` — AI 程式碼生成",
+      "`!explain <程式碼>` — AI 解釋程式碼",
       "`!model` — 查看目前模型和配額",
+      "",
+      "🎮 **趣味功能**",
+      "`!draw <描述>` — AI 文字藝術創作",
+      "`!quiz` — AI 出題小遊戲（`!quiz score` 查分數）",
+      "`!fortune` — 每日運勢占卜",
       "",
       "⚙️ **設定功能**",
       "`!role <角色>` — 切換 AI 人設（例：`!role 貓娘`）",
@@ -482,6 +492,235 @@ client.on("messageCreate", async (message) => {
         return await sendReply(message, `🌐 **${targetLang}翻譯**\n${result.response.text()}`);
       } catch {
         return sendReply(message, "翻譯失敗，請稍後再試！");
+      }
+    }
+  }
+
+  // === !draw ===
+  if (content.startsWith("!draw ")) {
+    const prompt = content.slice(6).trim();
+    if (!prompt) return sendReply(message, "請描述你想要的畫面！例：`!draw 一隻在月光下的貓`");
+
+    const cooldownLeft = checkCooldown(message.author.id);
+    if (cooldownLeft > 0) return sendReply(message, `⏳ 請稍候 ${cooldownLeft} 秒再試！`);
+    cooldowns.set(message.author.id, Date.now());
+    await message.channel.sendTyping();
+
+    try {
+      const drawPrompt = `你是一位文字藝術家。請根據以下描述，創作一幅精美的文字藝術畫（ASCII Art 或 Emoji Art），並加上簡短的藝術描述。描述：${prompt}`;
+      const result = await callWithRetry(() =>
+        withTimeout(primaryModel.generateContent(drawPrompt), TIMEOUT_MS)
+      );
+      incrementQuota("primary");
+      return await sendReply(message, `🎨 **AI 文字藝術**\n\n${result.response.text()}`);
+    } catch {
+      try {
+        const drawPrompt = `請根據以下描述創作文字藝術畫（ASCII Art 或 Emoji Art）：${prompt}`;
+        const result = await callWithRetry(() =>
+          withTimeout(fallbackModel.generateContent(drawPrompt), TIMEOUT_MS)
+        );
+        incrementQuota("fallback");
+        return await sendReply(message, `🎨 **AI 文字藝術**\n\n${result.response.text()}`);
+      } catch {
+        return sendReply(message, "文字藝術創作失敗，請稍後再試！");
+      }
+    }
+  }
+
+  // === !quiz ===
+  if (content === "!quiz score") {
+    const score = quizScores.get(message.author.id) || 0;
+    return sendReply(message, `🏆 你的測驗分數：**${score}** 分`);
+  }
+  if (content.startsWith("!quiz answer ") || content.startsWith("!quiz a ")) {
+    const active = quizActive.get(message.author.id);
+    if (!active) return sendReply(message, "你目前沒有進行中的題目！用 `!quiz` 開始新題目。");
+    if (Date.now() - active.timestamp > 120000) {
+      quizActive.delete(message.author.id);
+      return sendReply(message, `⏰ 作答超時！正確答案是：**${active.answer}**`);
+    }
+    const userAnswer = content.includes("!quiz answer ") ? content.slice(13).trim() : content.slice(8).trim();
+    quizActive.delete(message.author.id);
+    if (userAnswer.toUpperCase() === active.answer.toUpperCase()) {
+      const newScore = (quizScores.get(message.author.id) || 0) + 10;
+      quizScores.set(message.author.id, newScore);
+      return sendReply(message, `✅ 正確！+10 分，目前總分：**${newScore}** 分`);
+    } else {
+      return sendReply(message, `❌ 答錯了！正確答案是：**${active.answer}**\n目前分數：**${quizScores.get(message.author.id) || 0}** 分`);
+    }
+  }
+  if (content === "!quiz") {
+    const cooldownLeft = checkCooldown(message.author.id);
+    if (cooldownLeft > 0) return sendReply(message, `⏳ 請稍候 ${cooldownLeft} 秒再試！`);
+    cooldowns.set(message.author.id, Date.now());
+    await message.channel.sendTyping();
+
+    try {
+      const quizPrompt = `請出一道有趣的選擇題（知識、趣味、冷知識皆可），格式如下：
+📝 題目：（題目內容）
+A. 選項一
+B. 選項二
+C. 選項三
+D. 選項四
+
+最後另起一行，只寫正確答案的字母，格式為：ANSWER:X（X 為 A/B/C/D）`;
+      const result = await callWithRetry(() =>
+        withTimeout(primaryModel.generateContent(quizPrompt), TIMEOUT_MS)
+      );
+      incrementQuota("primary");
+      const quizText = result.response.text();
+      const answerMatch = quizText.match(/ANSWER:\s*([A-D])/i);
+      const answer = answerMatch ? answerMatch[1].toUpperCase() : "A";
+      const displayText = quizText.replace(/ANSWER:\s*[A-D]/i, "").trim();
+      quizActive.set(message.author.id, { answer, timestamp: Date.now() });
+      return await sendReply(message, `🧠 **AI 測驗**\n\n${displayText}\n\n💡 用 \`!quiz a <A/B/C/D>\` 作答（2 分鐘內）`);
+    } catch {
+      return sendReply(message, "出題失敗，請稍後再試！");
+    }
+  }
+
+  // === !fortune ===
+  if (content === "!fortune") {
+    const cooldownLeft = checkCooldown(message.author.id);
+    if (cooldownLeft > 0) return sendReply(message, `⏳ 請稍候 ${cooldownLeft} 秒再試！`);
+    cooldowns.set(message.author.id, Date.now());
+    await message.channel.sendTyping();
+
+    const today = new Date().toISOString().slice(0, 10);
+    const seed = `${today}-${message.author.id}`;
+
+    try {
+      const fortunePrompt = `你是一位占卜師。請根據種子「${seed}」給出今日運勢，包含：
+🌟 今日運勢等級（大吉/中吉/小吉/吉/末吉/凶/大凶）
+💼 事業運、💕 感情運、💰 財運（各一句話）
+🎯 今日幸運物
+⚠️ 今日注意事項
+風格要有趣、活潑，帶點幽默。`;
+      const result = await callWithRetry(() =>
+        withTimeout(primaryModel.generateContent(fortunePrompt), TIMEOUT_MS)
+      );
+      incrementQuota("primary");
+      return await sendReply(message, `🔮 **今日運勢**\n\n${result.response.text()}`);
+    } catch {
+      try {
+        const result = await callWithRetry(() =>
+          withTimeout(fallbackModel.generateContent(`請給出今日運勢占卜，包含事業、感情、財運和幸運物。`), TIMEOUT_MS)
+        );
+        incrementQuota("fallback");
+        return await sendReply(message, `🔮 **今日運勢**\n\n${result.response.text()}`);
+      } catch {
+        return sendReply(message, "占卜失敗，天機不可洩漏...請稍後再試！");
+      }
+    }
+  }
+
+  // === !search ===
+  if (content.startsWith("!search ")) {
+    const query = content.slice(8).trim();
+    if (!query) return sendReply(message, "請輸入搜尋關鍵字！例：`!search 黑洞是什麼`");
+
+    const cooldownLeft = checkCooldown(message.author.id);
+    if (cooldownLeft > 0) return sendReply(message, `⏳ 請稍候 ${cooldownLeft} 秒再試！`);
+    cooldowns.set(message.author.id, Date.now());
+    await message.channel.sendTyping();
+
+    try {
+      const searchPrompt = `請針對「${query}」提供詳細的知識摘要，包含：
+1. 簡短定義/說明
+2. 3-5 個重點
+3. 有趣的冷知識（如果有的話）
+請用繁體中文回覆，條理清晰。`;
+      const result = await callWithRetry(() =>
+        withTimeout(primaryModel.generateContent(searchPrompt), TIMEOUT_MS)
+      );
+      incrementQuota("primary");
+      return await sendReply(message, `🔍 **搜尋結果：${query}**\n\n${result.response.text()}`);
+    } catch {
+      try {
+        const result = await callWithRetry(() =>
+          withTimeout(fallbackModel.generateContent(`請針對「${query}」提供知識摘要，用繁體中文。`), TIMEOUT_MS)
+        );
+        incrementQuota("fallback");
+        return await sendReply(message, `🔍 **搜尋結果：${query}**\n\n${result.response.text()}`);
+      } catch {
+        return sendReply(message, "搜尋失敗，請稍後再試！");
+      }
+    }
+  }
+
+  // === !code ===
+  if (content.startsWith("!code ")) {
+    const args = content.slice(6).trim();
+    const spaceIndex = args.indexOf(" ");
+    if (spaceIndex === -1) {
+      return sendReply(message, "格式：`!code <語言> <描述>`\n例如：`!code python 排序演算法`");
+    }
+    const lang = args.slice(0, spaceIndex);
+    const desc = args.slice(spaceIndex + 1).trim();
+    if (!desc) return sendReply(message, "請描述要生成的程式碼！");
+
+    const cooldownLeft = checkCooldown(message.author.id);
+    if (cooldownLeft > 0) return sendReply(message, `⏳ 請稍候 ${cooldownLeft} 秒再試！`);
+    cooldowns.set(message.author.id, Date.now());
+    await message.channel.sendTyping();
+
+    try {
+      const codePrompt = `請用 ${lang} 寫出以下功能的程式碼：${desc}
+要求：
+1. 程式碼放在 \`\`\`${lang} 程式碼區塊中
+2. 加上簡短的中文註解
+3. 最後簡短說明程式碼的運作方式`;
+      const result = await callWithRetry(() =>
+        withTimeout(primaryModel.generateContent(codePrompt), TIMEOUT_MS)
+      );
+      incrementQuota("primary");
+      return await sendReply(message, `💻 **${lang} 程式碼生成**\n\n${result.response.text()}`);
+    } catch {
+      try {
+        const result = await callWithRetry(() =>
+          withTimeout(fallbackModel.generateContent(`請用 ${lang} 寫出：${desc}。用程式碼區塊格式，加中文註解。`), TIMEOUT_MS)
+        );
+        incrementQuota("fallback");
+        return await sendReply(message, `💻 **${lang} 程式碼生成**\n\n${result.response.text()}`);
+      } catch {
+        return sendReply(message, "程式碼生成失敗，請稍後再試！");
+      }
+    }
+  }
+
+  // === !explain ===
+  if (content.startsWith("!explain ")) {
+    const code = content.slice(9).trim();
+    if (!code) return sendReply(message, "請提供要解釋的程式碼！例：`!explain console.log('hello')`");
+
+    const cooldownLeft = checkCooldown(message.author.id);
+    if (cooldownLeft > 0) return sendReply(message, `⏳ 請稍候 ${cooldownLeft} 秒再試！`);
+    cooldowns.set(message.author.id, Date.now());
+    await message.channel.sendTyping();
+
+    try {
+      const explainPrompt = `請用繁體中文解釋以下程式碼，包含：
+1. 這段程式碼的功能
+2. 逐行/逐段解釋
+3. 使用了哪些重要概念
+4. 可能的改進建議
+
+程式碼：
+${code}`;
+      const result = await callWithRetry(() =>
+        withTimeout(primaryModel.generateContent(explainPrompt), TIMEOUT_MS)
+      );
+      incrementQuota("primary");
+      return await sendReply(message, `📖 **程式碼解釋**\n\n${result.response.text()}`);
+    } catch {
+      try {
+        const result = await callWithRetry(() =>
+          withTimeout(fallbackModel.generateContent(`請用繁體中文解釋這段程式碼：\n${code}`), TIMEOUT_MS)
+        );
+        incrementQuota("fallback");
+        return await sendReply(message, `📖 **程式碼解釋**\n\n${result.response.text()}`);
+      } catch {
+        return sendReply(message, "程式碼解釋失敗，請稍後再試！");
       }
     }
   }
